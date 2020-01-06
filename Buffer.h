@@ -13,9 +13,16 @@ public:
 	void release()
 	{
 		length = 0;
-		if (buffer)
+		if (buffer != nullptr)
 			delete[] buffer;
 		buffer = nullptr;
+	}
+
+	BaseBuffer slice(int count)
+	{
+		BaseBuffer buf(count);
+		memcpy(buf.buffer, buffer, count);
+		return buf;
 	}
 
 	void reserve(int _size)
@@ -26,7 +33,7 @@ public:
 			throw std::runtime_error("buffer size can't be under zero");
 		}
 		length = _size;
-		if (buffer)
+		if (buffer != nullptr)
 			delete[] buffer;
 		buffer = new dtype[length];
 	}
@@ -47,7 +54,7 @@ public:
 		buffer = nullptr;
 	}
 
-	BaseBuffer(int size)
+	BaseBuffer(int size) : buffer(nullptr)
 	{
 		reserve(size);
 	}
@@ -94,21 +101,47 @@ public:
 		return arr;
 	}
 
+	void push_front(T& e) {
+		if (last + 1 == N)
+			throw std::runtime_error("SequentArrayList push_front&: overflow");
+		arr[last+1] = arr[0];
+		arr[0] = e;
+		++last;
+	}
+
+	void push_front(T&& e) {
+		if (last + 1 == N)
+			throw std::runtime_error("SequentArrayList push_front&: overflow");
+
+		arr[last+1] = move(arr[0]);
+		arr[0] = move(e);
+		++last;
+	}
+
 	void push(T& e) {
-		last++;
-		arr[last] = e;
+		if (last + 1 == N)
+			throw std::runtime_error("SequentArrayList push&: overflow");
+		arr[last+1] = e;
+		++last;
 	}
 
 	void push(T&& e) {
-		last++;
-		arr[last] = std::move(e);
+		if (last + 1 == N)
+			throw std::runtime_error("SequentArrayList push&&: overflow");
+		arr[last+1] = std::move(e);
+		++last;
 	}
 
 	void pop(int n) {
-		arr[n] = arr[last--];
+		if (last == -1)
+			throw std::runtime_error("SequentArrayList pop: poped empty");
+		arr[n] = arr[last];
+		--last;
 	}
 
-	T& at(int n) const {
+	T& at(int n) {
+		if (n >= N)
+			throw std::runtime_error("SequentArrayList at: invalid indexing");
 		return arr[n];
 	}
 
@@ -119,51 +152,68 @@ public:
 
 template <int N>
 class RecyclerBuffer {
+	using BYTE = unsigned char;
 	BYTE buffer[N];
 	int start;
 	int end;
 	int used;
 public:
-	RecyclerBuffer() : start(0), end(0), used(N) {
+	RecyclerBuffer() : start(0), end(0), used(0) {
 
 	}
 
-	auto push(const CBuffer& buf) {
-		const int&& sz = buf.size();
+	auto push(const CBuffer& buf, int sz) {
 		if (used + sz > N)
-			return false;
+			throw std::runtime_error("RecyclerBuffer push: overflow");
 
 		if (end + sz > N) {
 			Arrange();
 		}
 
-		memcpy(buffer+end, buf.getBuffer(), sz);
+		memcpy(buffer + end, buf.getBuffer(), sz);
 		end += sz;
 		used += sz;
 
-		return true;
+		return;// true;
+	}
+
+	auto push(const CBuffer& buf) {
+		push(buf, buf.length);
+		return;
 	}
 
 	auto poll(CBuffer& dst, size_t sz) {
 		if (used < sz) {
-			return false;
+			throw std::runtime_error("RecyclerBuffer push2param: overflow");
 		}
 
 		memcpy(dst.getBuffer(), buffer + start, sz);
 		start += sz;
 		used -= sz;
 
-		return true;
+		return;
+	}
+
+	auto Used() const {
+		return used;
 	}
 private:
-	void Arrange() {
-		if (!start || !used)
+	auto Arrange() {
+		if (!start)
 			return;
-		BYTE* tmpB = malloc(used);
+		if (!used) {
+			start = 0;
+			end = 0;
+			return;
+		}
+		BYTE* tmpB = reinterpret_cast<BYTE*>(malloc(used));
+		if (!tmpB)
+			throw std::runtime_error("Recycler malloc failed");
 		memcpy(tmpB, buffer + start, used);
 		memcpy(buffer, tmpB, used);
 		free(tmpB);
 		start = 0;
 		end = used;
+		return;
 	}
 };

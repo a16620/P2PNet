@@ -1,7 +1,7 @@
 #pragma once
 #include <WinSock2.h>
-#pragma comment(lib, "ws2_32.lib")
 #include <memory>
+#pragma comment(lib, "ws2_32.lib")
 #include "Buffer.h"
 using namespace std;
 
@@ -12,7 +12,8 @@ public:
 	SocketRAII(SOCKET socket);
 	SocketRAII(SocketRAII&& socket) noexcept;
 	~SocketRAII();
-	void reset(SOCKET socket = INVALID_SOCKET);
+	void reset(SOCKET socket);
+	void release();
 	SocketRAII& operator=(SocketRAII&& other) noexcept;
 	SOCKET getHandle() const;
 };
@@ -35,16 +36,16 @@ public:
 class TcpCommunicator
 {
 private:
-	SocketRAII m_socket;
+	SOCKET m_socket;
 public:
-	TcpCommunicator(SocketRAII&& socket);
+	TcpCommunicator(SOCKET socket);
 	~TcpCommunicator();
 
 	unique_ptr<CBuffer> Receive();
 	auto Send(const CBuffer& buffer);
-	void reset(SocketRAII&& socket);
-	auto getHandle() {
-		return m_socket.getHandle();
+	void reset(SOCKET socket);
+	auto getHandle()  const {
+		return m_socket;
 	}
 
 
@@ -55,32 +56,23 @@ public:
 class TcpListener
 {
 private:
-	SocketRAII m_socket;
+	SOCKET m_socket;
 	sockaddr_in m_addr;
 public:
-	TcpListener(SocketRAII&&);
+	TcpListener(SOCKET);
 	~TcpListener();
 	void SetAddress(const ULONG& address, int port);
 	void Listen(int backlog);
 	void Bind();
-	SocketRAII Accept();
+	SOCKET Accept();
+	SOCKET Accept(ULONG* addr);
 	void Shutdown(int how);
 	void Close();
+	auto getHandle()  const {
+		return m_socket;
+	}
 };
 
-auto make_tcpSocket() {
-	SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (s == INVALID_SOCKET)
-		throw SocketException(0);
-	return s;
-}
-
-void Bind(SOCKET s, const ULONG& address, int port) {
-	sockaddr_in addr;
-	ZeroMemory(&addr, sizeof(sockaddr_in));
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(address);
-	addr.sin_port = htons(port);
-	bind(s, (sockaddr*)&addr, sizeof(sockaddr_in));
-
-}
+SOCKET make_tcpSocket();
+void Bind(SOCKET s, const ULONG& address, int port);
+void PerfectSend(SOCKET s, CBuffer& buffer);

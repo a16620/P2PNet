@@ -1,5 +1,6 @@
 #pragma once
 #include "Network.h"
+#include <uuids.h>
 #include <thread>
 #include <future>
 #include <atomic>
@@ -12,6 +13,8 @@ using namespace std;
 
 constexpr int ttl_default = 30;
 constexpr int port_router = 511;
+constexpr int NetMaxChild = min(WSA_MAXIMUM_WAIT_EVENTS, 5);
+constexpr int NetTotalCount = NetMaxChild+1;
 /*
 	Router
 	-소켓 리스닝 (스레드 1)-비동기 작업
@@ -25,45 +28,65 @@ constexpr int port_router = 511;
 			-노드에게 이전 요청을 보내고 수락 문자 받은 후 연결 해제
 			-수락 노드는 연결 해제후 요청의 주소 중 하나로 연결한다
 */
+
 class NetRouter {
-	atomic_bool isRunning;
-	atomic_int16_t cntNeighbor;
-
-	thread listening;
-	SocketRAII listener;
-
-	SequentArrayList<WSAEVENT, WSA_MAXIMUM_WAIT_EVENTS> m_arrEvt;
-	SequentArrayList<SocketRAII, WSA_MAXIMUM_WAIT_EVENTS> m_arrCon;
-	SequentArrayList<RecyclerBuffer<100>, WSA_MAXIMUM_WAIT_EVENTS> m_arrBuf;
-
-	mutex m_Bmutex, m_Smutex;
-	queue<CBuffer> m_buffer;
-	
 private:
-	void Routing();
-	void EndRouting();
-	void Listening();
-	void EndListening();
-	void Tasking();
-	void Refresh();
-	void Replace();
+	atomic_bool isRunning;
+	atomic_uint8_t cntChild;
+	
 
-	void AddEvent(SOCKET s, WSAEVENT e);
+	thread listening, routing, tasking;
+
+	TcpListener listener;
+	SOCKET parent;
+	ULONG parentid;
+
+	ULONG rep_addr;
+
+	struct SOCKETIN {
+		int needSize;
+		int cntChild;
+		SOCKET socket;
+		ULONG id;
+		RecyclerBuffer<256> buffer;
+	};
+
+	mutex  m_modifyLock;
+	SequentArrayList<WSAEVENT, NetTotalCount> m_arrEvt;
+	SequentArrayList<SOCKETIN, NetTotalCount> m_arrIn;
+
+	struct PacketPair {
+		ULONG id;
+		CBuffer buffer;
+	};
+
+	mutex m_packetLock;
+	queue<PacketPair> m_packetBuffer;
+	
+	mutex m_outputLock;
+	condition_variable cv;
+	queue<PacketPair> m_outputBuffer;
+
+private:
+	void Stacking();
+	void Listening();
+	void Tasking();
+	void SubTasking();
+	void ClearStacking();
+	void StopListening();
+
+	void ConnectToParent(ULONG addr);
+	void BroadCastToNodes(CBuffer& packet, const ULONG& filter);
+
+	void OutputQueue(PacketPair&& packet);
+
+	void AddEvent(SOCKET s, WSAEVENT e, ULONG addr);
+	void RemoveEvent(int idx);
 public:
 	NetRouter();
-	bool Join();
-	void End();
+	void Start();
+	void Stop();
 };
-
-auto getConnectedSocket(const ULONG& ta) {
-	SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	sockaddr_in addr;
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = ta;
-	addr.sin_port = htons(port_router);
-	while (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(sockaddr_in)));
-	return s;
-}
 
 class NetHost {
 	
@@ -71,11 +94,14 @@ public:
 
 };
 
+enum class NetPacketProtocol : BYTE {
+	REPLACE_ADDR,
+	QUERY
+};
+
 struct NetPacketHeader {
-	BYTE priority : 2;
-	BYTE ttl : 6;
+	NetPacketProtocol protocol;
 	BYTE flag;
-	ULONG from;
 };
 
 class PacketFactory {
@@ -83,16 +109,17 @@ public:
 	static constexpr auto szHeader = sizeof(NetPacketHeader);
 
 	static auto NetPacketBuffer(const NetPacketHeader& header, const CBuffer& content) {
-		auto buffer = make_unique<CBuffer>(static_cast<int>(szHeader + content.size()));
-		memcpy(buffer->getBuffer(), &header, szHeader);
-		memcpy(buffer->getBuffer() + szHeader, content.getBuffer(), content.size());
+		CBuffer buffer(static_cast<int>(szHeader + content.size()));
+		memcpy(buffer.getBuffer(), &header, szHeader);
+		memcpy(buffer.getBuffer() + szHeader, content.getBuffer(), content.size());
 		return buffer;
 	}
 
-	static auto NetPacketIP(const NetPacketHeader& header, const ULONG& ip) {
-		auto buffer = make_unique<CBuffer>(static_cast<int>(szHeader + sizeof(ULONG)));
-		memcpy(buffer->getBuffer(), &header, szHeader);
-		memcpy(buffer->getBuffer() + szHeader, &ip, sizeof(ULONG));
+	static auto NetPacketIP(ULONG ip) {
+		CBuffer buffer(static_cast<int>(szHeader + sizeof(ULONG)));
+		static constexpr NetPacketHeader header{NetPacketProtocol::REPLACE_ADDR, 0};
+		memcpy(buffer.getBuffer(), &header, szHeader);
+		memcpy(buffer.getBuffer() + szHeader, &ip, sizeof(ULONG));
 		return buffer;
 	}
 };
