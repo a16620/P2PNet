@@ -218,6 +218,36 @@ void PerfectSend(SOCKET s, CBuffer& buffer)
 	} while (r < sz);
 }
 
+void PerfectRecv(SOCKET s, CBuffer& buffer)
+{
+	long len = 0, t = 0;
+	do {
+		int t_;
+		t_ = recv(s, ((char*)&len) + t, 4 - t, 0);
+		if (t_ == -1)
+		{
+			throw SocketException(SocketException::E::DISCONN);
+		}
+		else
+			t += t_;
+	} while (t < 4);
+
+	len = ntohl(len);
+	buffer.reserve(len);
+	t = 0;
+	do {
+		int t_;
+		t_ = recv(s, ((char*)buffer.getBuffer()) + t, len - t, 0);
+		if (t_ == -1)
+		{
+			buffer.release();
+			throw SocketException(SocketException::E::DISCONN);
+		}
+		else
+			t += t_;
+	} while (t < len);
+}
+
 SOCKET make_tcpSocket() {
 	SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);//WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
 	if (s == INVALID_SOCKET)

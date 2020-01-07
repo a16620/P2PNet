@@ -71,8 +71,18 @@ public:
 	auto getHandle()  const {
 		return m_socket;
 	}
+
+	static SOCKET Accept(SOCKET s, ULONG* addr)
+	{
+		sockaddr_in _addr;
+		int sz = sizeof(sockaddr_in);
+		auto as = accept(s, (sockaddr*)&_addr, &sz);
+		*addr = _addr.sin_addr.S_un.S_addr;
+		return as;
+	}
 };
 
 SOCKET make_tcpSocket();
 void Bind(SOCKET s, const ULONG& address, int port);
 void PerfectSend(SOCKET s, CBuffer& buffer);
+void PerfectRecv(SOCKET s, CBuffer& buffer);

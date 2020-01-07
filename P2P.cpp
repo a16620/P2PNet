@@ -1,17 +1,19 @@
 #include "P2P.h"
 
-NetRouter::NetRouter() : isRunning(true), listener(make_tcpSocket()), parent(make_tcpSocket()), parentid(INADDR_NONE)
+NetRouter::NetRouter(ULONG _parent) : isRunning(true), listener(make_tcpSocket()), parent(make_tcpSocket()), parentid(_parent), orderer(5, move(_parent)), rep_addr(INADDR_NONE)
 {
+	ConnectToParent(_parent);
 	listener.SetAddress(INADDR_ANY, port_router);
 	listener.Bind();
 	listener.Listen(5);
+	AddListenEvent(listener.getHandle(), WSACreateEvent(), INADDR_NONE);
 }
 
 void NetRouter::Start()
 {
-	listening = move(thread([](NetRouter* router) { router->Listening(); }, this));
 	routing = move(thread([](NetRouter* router) { router->Stacking(); }, this));
 	tasking = move(thread([](NetRouter* router) { router->Tasking(); }, this));
+	subtasking = move(thread([](NetRouter* router) { router->SubTasking(); }, this));
 }
 
 void NetRouter::Stacking()
@@ -19,7 +21,18 @@ void NetRouter::Stacking()
 	WSANETWORKEVENTS networkEvents;
 	DWORD idx;
 	CBuffer cBuffer(1024);
+	register int frame = 0;
 	while (isRunning) {
+		if (++frame == 3) {
+			CalculateOptimalNode();
+			if (parentid == INADDR_NONE)
+				OutputQueue(PacketPair{ parentid, PacketFactory::NetPacketIP(orderer.getValue()) });
+			else
+				OutputQueue(PacketPair{ parentid, PacketFactory::NetPacketIP(parentid) });
+			frame = 0;
+		}
+		
+
 		idx = WSAWaitForMultipleEvents(m_arrEvt.size(), m_arrEvt.getArray(), FALSE, 1000, FALSE);
 		if (idx == WSA_WAIT_FAILED || idx == WSA_WAIT_TIMEOUT)
 			continue;
@@ -28,11 +41,31 @@ void NetRouter::Stacking()
 			continue;
 
 		auto& st = m_arrIn.at(idx);
+
+		if (networkEvents.lNetworkEvents & FD_ACCEPT) {
+			if (networkEvents.iErrorCode[FD_ACCEPT_BIT] == 0) {
+				ULONG addr;
+				SOCKET s(TcpListener::Accept(st.socket, &addr));
+				if (m_arrEvt.size() >= NetMaxChild)
+				{
+					auto buf = PacketFactory::NetPacketIP(orderer.getValue(), NetPacketFlag::REFUSE);
+					PerfectSend(s, buf);
+					shutdown(s, SD_BOTH);
+					closesocket(s);
+				}
+				else
+				{
+					auto buf = PacketFactory::NetPacketIP(parentid, NetPacketFlag::CONN);
+					PerfectSend(s, buf);
+					AddEvent(s, WSACreateEvent(), addr);
+				}
+			}
+		}
+
 		if (networkEvents.lNetworkEvents & FD_READ) {
 			int readbytes = recv(st.socket, cBuffer.getBuffer(), 1024, 0);
 			if (readbytes == 0)
 				continue;
-
 			st.buffer.push(cBuffer, readbytes);
 			if (st.needSize == -1) {
 				if (st.buffer.Used() >= 4) {
@@ -51,15 +84,13 @@ void NetRouter::Stacking()
 		}
 
 		if (networkEvents.lNetworkEvents & FD_CLOSE) {
-			if (networkEvents.iErrorCode[FD_CLOSE_BIT]) {
-				if (m_arrIn.at(idx).socket == parent) {
-					parent = make_tcpSocket();
-					parentid = INADDR_NONE;
-					if (rep_addr != INADDR_NONE)
-						async(launch::async, [](NetRouter* r, ULONG addr) { r->ConnectToParent(addr); }, this, rep_addr);
-				}
-				RemoveEvent(idx);
+			if (m_arrIn.at(idx).socket == parent) {
+				parent = make_tcpSocket();
+				parentid = INADDR_NONE;
+				if (rep_addr != INADDR_NONE)
+					async(launch::async, [](NetRouter* r, ULONG addr) { r->ConnectToParent(addr); }, this, rep_addr);
 			}
+			RemoveEvent(idx);
 		}
 	}
 }
@@ -75,30 +106,21 @@ void NetRouter::ClearStacking()
 	while (!m_packetBuffer.empty()) {
 		m_packetBuffer.pop();
 	}
-}
-
-void NetRouter::Listening()
-{
-	while (isRunning)
-	{
-		ULONG addr;
-		SOCKET s(listener.Accept(&addr));
-		if (m_arrEvt.size() >= NetMaxChild)
-		{
-			shutdown(s, SD_BOTH);
-			closesocket(s);
-		}
-		else
-		{
-			AddEvent(s, WSACreateEvent(), addr);
-			OutputQueue(PacketPair{ parentid, PacketFactory::NetPacketIP(parentid) });
-		}
+	while (!m_outputBuffer.empty()) {
+		m_outputBuffer.pop();
 	}
 }
 
 void NetRouter::StopListening()
 {
 	listener.Close();
+}
+
+void NetRouter::CalculateOptimalNode()
+{
+	for (int i = 0; i < m_arrIn.size(); ++i) {
+		orderer.Update(m_arrIn.at(i).cntChild, m_arrIn.at(i).id);
+	}
 }
 
 void NetRouter::Tasking()
@@ -128,21 +150,38 @@ void NetRouter::Tasking()
 			}
 			break;
 		}
+		case NetPacketProtocol::CHILDCOUNT:
+		{
+			try {
+				lock_guard<mutex> lk(m_modifyLock);
+				for (int i = 0; i < m_arrIn.size(); ++i)
+				{
+					if (pair.id == m_arrIn.at(i).id) {
+						m_arrIn.at(i).cntChild = *reinterpret_cast<BYTE*>(pair.buffer.getBuffer() + offset);
+						break;
+					}
+				}
+			}
+			catch (...) {}
+			break;
+		}
 		case NetPacketProtocol::QUERY:
 		{
-			printf("QUERY: %s", pair.buffer.getBuffer() + offset);
+			printf("QUERY: %s\n", pair.buffer.getBuffer() + offset);
+		}
+		default:
+		{
+			OutputQueue(move(pair));
 			break;
 		}
 		}
-
-		OutputQueue(move(pair));
 	}
 }
 
 void NetRouter::SubTasking()
 {
 	PacketPair pair;
-	while (true) {
+	while (!isRunning) {
 		{
 			unique_lock<mutex> lk(m_outputLock);
 			cv.wait(lk, [&] {return !m_outputBuffer.empty() || !isRunning; });
@@ -160,12 +199,21 @@ void NetRouter::SubTasking()
 
 void NetRouter::ConnectToParent(ULONG addr)
 {
+	if (addr == INADDR_NONE)
+		return;
 	sockaddr_in _addr;
 	_addr.sin_addr.S_un.S_addr = addr;
 	_addr.sin_port = htons(port_router);
 	_addr.sin_family = AF_INET;
 
-	connect(parent, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)); //설계 필요
+	CBuffer buffer;
+	do {
+		if (connect(parent, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == -1)
+			break;
+		PerfectRecv(parent, buffer);
+		memcpy(&parent, buffer.getBuffer() + PacketFactory::szHeader, sizeof(ULONG));
+	} while ((*reinterpret_cast<NetPacketHeader*>(buffer.getBuffer())).flag != NetPacketFlag::CONN);
+	
 
 	parentid = addr;
 	OutputQueue(PacketPair{ addr, PacketFactory::NetPacketIP(parentid) });
@@ -174,7 +222,7 @@ void NetRouter::ConnectToParent(ULONG addr)
 void NetRouter::BroadCastToNodes(CBuffer& packet, const ULONG& filter)
 {
 	lock_guard<mutex> lk(m_modifyLock);
-	for (int i = 0; i < m_arrIn.size(); ++i)
+	for (int i = 1; i < m_arrIn.size(); ++i)
 	{
 		auto s = m_arrIn.at(i).socket;
 		if (s == filter)
@@ -195,9 +243,20 @@ void NetRouter::OutputQueue(PacketPair&& packet)
 	cv.notify_one();
 }
 
-void NetRouter::AddEvent(SOCKET s, WSAEVENT e, ULONG addr)
+void NetRouter::AddEvent(SOCKET s, WSAEVENT e, ULONG addr) //Stacking만 호출.
 {
 	WSAEventSelect(s, e, FD_READ | FD_CLOSE);
+	auto si = SOCKETIN{ -1,0,s,addr };
+	{
+		lock_guard<mutex> lk(m_modifyLock);
+		m_arrIn.push((si));
+		m_arrEvt.push(e);
+	}
+}
+
+void NetRouter::AddListenEvent(SOCKET s, WSAEVENT e, ULONG addr) //Stacking만 호출.
+{
+	WSAEventSelect(s, e, FD_ACCEPT | FD_READ | FD_CLOSE);
 	auto si = SOCKETIN{ -1,0,s,addr };
 	{
 		lock_guard<mutex> lk(m_modifyLock);
@@ -222,9 +281,9 @@ void NetRouter::Stop()
 	cv.notify_one();
 	StopListening();
 
-	listening.join();
 	routing.join();
 	tasking.join();
+	subtasking.join();
 
 	ClearStacking();
 }

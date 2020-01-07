@@ -69,7 +69,7 @@ public:
 
 	}
 
-	BaseBuffer& operator=(BaseBuffer&& o) {
+	BaseBuffer& operator=(BaseBuffer&& o) noexcept {
 		length = o.length;
 		buffer = o.buffer;
 

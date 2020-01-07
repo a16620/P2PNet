@@ -1,5 +1,6 @@
 #pragma once
 #include "Network.h"
+#include "Utils.h"
 #include <uuids.h>
 #include <thread>
 #include <future>
@@ -14,7 +15,7 @@ using namespace std;
 constexpr int ttl_default = 30;
 constexpr int port_router = 511;
 constexpr int NetMaxChild = min(WSA_MAXIMUM_WAIT_EVENTS, 5);
-constexpr int NetTotalCount = NetMaxChild+1;
+constexpr int NetTotalCount = NetMaxChild+2;
 /*
 	Router
 	-소켓 리스닝 (스레드 1)-비동기 작업
@@ -28,24 +29,24 @@ constexpr int NetTotalCount = NetMaxChild+1;
 			-노드에게 이전 요청을 보내고 수락 문자 받은 후 연결 해제
 			-수락 노드는 연결 해제후 요청의 주소 중 하나로 연결한다
 */
-
 class NetRouter {
 private:
 	atomic_bool isRunning;
 	atomic_uint8_t cntChild;
 	
 
-	thread listening, routing, tasking;
+	thread routing, tasking, subtasking;
 
 	TcpListener listener;
 	SOCKET parent;
 	ULONG parentid;
-
 	ULONG rep_addr;
 
+	AtomicMinimum<BYTE, ULONG> orderer;
+
 	struct SOCKETIN {
-		int needSize;
-		int cntChild;
+		int needSize = -1;
+		BYTE cntChild = NetMaxChild;
 		SOCKET socket;
 		ULONG id;
 		RecyclerBuffer<256> buffer;
@@ -69,11 +70,12 @@ private:
 
 private:
 	void Stacking();
-	void Listening();
 	void Tasking();
 	void SubTasking();
 	void ClearStacking();
 	void StopListening();
+
+	void CalculateOptimalNode();
 
 	void ConnectToParent(ULONG addr);
 	void BroadCastToNodes(CBuffer& packet, const ULONG& filter);
@@ -81,9 +83,10 @@ private:
 	void OutputQueue(PacketPair&& packet);
 
 	void AddEvent(SOCKET s, WSAEVENT e, ULONG addr);
+	void AddListenEvent(SOCKET s, WSAEVENT e, ULONG addr);
 	void RemoveEvent(int idx);
 public:
-	NetRouter();
+	NetRouter(ULONG _parent);
 	void Start();
 	void Stop();
 };
@@ -96,12 +99,19 @@ public:
 
 enum class NetPacketProtocol : BYTE {
 	REPLACE_ADDR,
-	QUERY
+	QUERY,
+	CHILDCOUNT
+};
+
+enum class NetPacketFlag : BYTE {
+	CONN,
+	DISCONN,
+	REFUSE
 };
 
 struct NetPacketHeader {
 	NetPacketProtocol protocol;
-	BYTE flag;
+	NetPacketFlag flag;
 };
 
 class PacketFactory {
@@ -115,11 +125,20 @@ public:
 		return buffer;
 	}
 
-	static auto NetPacketIP(ULONG ip) {
+	static auto NetPacketIP(ULONG ip, NetPacketFlag flag=NetPacketFlag::CONN) {
 		CBuffer buffer(static_cast<int>(szHeader + sizeof(ULONG)));
-		static constexpr NetPacketHeader header{NetPacketProtocol::REPLACE_ADDR, 0};
+		static NetPacketHeader header{NetPacketProtocol::REPLACE_ADDR, NetPacketFlag::CONN};
+		header.flag = flag;
 		memcpy(buffer.getBuffer(), &header, szHeader);
 		memcpy(buffer.getBuffer() + szHeader, &ip, sizeof(ULONG));
+		return buffer;
+	}
+
+	static auto NetPacketChildCnt(BYTE cnt) {
+		CBuffer buffer(static_cast<int>(szHeader + 1));
+		static constexpr NetPacketHeader header{ NetPacketProtocol::CHILDCOUNT, NetPacketFlag::CONN };
+		memcpy(buffer.getBuffer(), &header, szHeader);
+		*reinterpret_cast<BYTE*>(buffer.getBuffer() + szHeader) = cnt;
 		return buffer;
 	}
 };

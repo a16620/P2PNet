@@ -6,7 +6,18 @@
 int main() {
 	WSADATA data;
 	WSAStartup(MAKEWORD(2, 2), &data);
-	NetRouter r;
+
+	char ip[20];
+	cout << "ip:";
+	ULONG addr;
+	cin >> ip;
+	if (ip[0] != 'n') {
+		addr = inet_addr(ip);
+	}
+	else {
+		addr = INADDR_NONE;
+	}
+	NetRouter r(addr);
 
 	r.Start();
 	getchar();
