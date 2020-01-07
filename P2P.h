@@ -66,6 +66,7 @@ private:
 	
 	mutex m_outputLock;
 	condition_variable cv;
+	atomic_bool newdata;
 	queue<PacketPair> m_outputBuffer;
 
 private:

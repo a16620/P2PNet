@@ -1,12 +1,12 @@
 #include "P2P.h"
 
-NetRouter::NetRouter(ULONG _parent) : isRunning(true), listener(make_tcpSocket()), parent(make_tcpSocket()), parentid(_parent), orderer(5, move(_parent)), rep_addr(INADDR_NONE)
+NetRouter::NetRouter(ULONG _parent) : isRunning(true), listener(make_tcpSocket()), parent(make_tcpSocket()), parentid(_parent), orderer(5, move(_parent)), rep_addr(INADDR_NONE), newdata(false)
 {
-	ConnectToParent(_parent);
 	listener.SetAddress(INADDR_ANY, port_router);
 	listener.Bind();
 	listener.Listen(5);
 	AddListenEvent(listener.getHandle(), WSACreateEvent(), INADDR_NONE);
+	ConnectToParent(_parent);
 }
 
 void NetRouter::Start()
@@ -48,16 +48,24 @@ void NetRouter::Stacking()
 				SOCKET s(TcpListener::Accept(st.socket, &addr));
 				if (m_arrEvt.size() >= NetMaxChild)
 				{
-					auto buf = PacketFactory::NetPacketIP(orderer.getValue(), NetPacketFlag::REFUSE);
-					PerfectSend(s, buf);
+					try {
+						auto buf = PacketFactory::NetPacketIP(orderer.getValue(), NetPacketFlag::REFUSE);
+						PerfectSend(s, buf);
+						
+					} catch (...) {}
 					shutdown(s, SD_BOTH);
 					closesocket(s);
 				}
 				else
 				{
-					auto buf = PacketFactory::NetPacketIP(parentid, NetPacketFlag::CONN);
-					PerfectSend(s, buf);
-					AddEvent(s, WSACreateEvent(), addr);
+					try {
+						auto buf = PacketFactory::NetPacketIP(parentid, NetPacketFlag::CONN);
+						PerfectSend(s, buf);
+						AddEvent(s, WSACreateEvent(), addr);
+					}
+					catch (...) {
+						closesocket(s);
+					}
 				}
 			}
 		}
@@ -87,6 +95,7 @@ void NetRouter::Stacking()
 			if (m_arrIn.at(idx).socket == parent) {
 				parent = make_tcpSocket();
 				parentid = INADDR_NONE;
+				printf("end conn");
 				if (rep_addr != INADDR_NONE)
 					async(launch::async, [](NetRouter* r, ULONG addr) { r->ConnectToParent(addr); }, this, rep_addr);
 			}
@@ -128,18 +137,20 @@ void NetRouter::Tasking()
 	while (isRunning) {
 		PacketPair pair;
 		{
-			lock_guard<mutex> lk(m_packetLock);
+			unique_lock<mutex> lk(m_packetLock);
+			lk.lock();
 			if (m_packetBuffer.empty())
 			{
+				lk.unlock();
 				Sleep(150);
 				continue;
 			}
 			pair = move(m_packetBuffer.front());
 			m_packetBuffer.pop();
+			lk.unlock();
 		}
 		auto bytes = pair.buffer.getBuffer();
 		auto offset = PacketFactory::szHeader;
-		
 		switch (reinterpret_cast<NetPacketHeader*>(bytes)->protocol)
 		{
 		case NetPacketProtocol::REPLACE_ADDR:
@@ -181,19 +192,35 @@ void NetRouter::Tasking()
 void NetRouter::SubTasking()
 {
 	PacketPair pair;
-	while (!isRunning) {
+	while (isRunning) { //최적화 필요
 		{
 			unique_lock<mutex> lk(m_outputLock);
-			cv.wait(lk, [&] {return !m_outputBuffer.empty() || !isRunning; });
+			if (!m_outputBuffer.empty())
+				lk.lock();
+			else
+				cv.wait(lk, [&] {return !m_outputBuffer.empty() || !isRunning; });
 			if (!isRunning) {
 				lk.unlock();
 				return;
 			}
-			pair = move(m_outputBuffer.front());
-			m_outputBuffer.pop();
+			lk.unlock();
+
+			while (true) {
+				lk.lock();
+				if (!m_outputBuffer.empty()) {
+					pair = move(m_outputBuffer.front());
+					m_outputBuffer.pop();
+					lk.unlock();
+					BroadCastToNodes(pair.buffer, pair.id);
+				}
+				else {
+					lk.unlock();
+					break;
+				}
+			}
 		}
 
-		BroadCastToNodes(pair.buffer, pair.id);
+		
 	}
 }
 
@@ -208,15 +235,16 @@ void NetRouter::ConnectToParent(ULONG addr)
 
 	CBuffer buffer;
 	do {
-		if (connect(parent, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == -1)
-			break;
+		if (connect(parent, reinterpret_cast<sockaddr*>(&_addr), sizeof(_addr)) == -1)
+			return;
 		PerfectRecv(parent, buffer);
-		memcpy(&parent, buffer.getBuffer() + PacketFactory::szHeader, sizeof(ULONG));
+		memcpy(&_addr.sin_addr.S_un.S_addr, buffer.getBuffer() + PacketFactory::szHeader, sizeof(ULONG));
+		
 	} while ((*reinterpret_cast<NetPacketHeader*>(buffer.getBuffer())).flag != NetPacketFlag::CONN);
-	
 
-	parentid = addr;
-	OutputQueue(PacketPair{ addr, PacketFactory::NetPacketIP(parentid) });
+	parentid = _addr.sin_addr.S_un.S_addr;
+	AddEvent(parent, WSACreateEvent(), parentid);
+	OutputQueue(PacketPair{ parentid, PacketFactory::NetPacketIP(parentid) });
 }
 
 void NetRouter::BroadCastToNodes(CBuffer& packet, const ULONG& filter)
@@ -224,13 +252,14 @@ void NetRouter::BroadCastToNodes(CBuffer& packet, const ULONG& filter)
 	lock_guard<mutex> lk(m_modifyLock);
 	for (int i = 1; i < m_arrIn.size(); ++i)
 	{
-		auto s = m_arrIn.at(i).socket;
-		if (s == filter)
+		auto p = m_arrIn.at(i);
+		if (p.id == filter)
 			continue;
 		try {
-			PerfectSend(s, packet);
+			PerfectSend(p.socket, packet);
 		}
-		catch (SocketException e) {}
+		catch (SocketException e) {
+		} //로그
 	}
 }
 
@@ -284,6 +313,8 @@ void NetRouter::Stop()
 	routing.join();
 	tasking.join();
 	subtasking.join();
+
+	closesocket(parent);
 
 	ClearStacking();
 }

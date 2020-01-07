@@ -20,7 +20,12 @@ int main() {
 	NetRouter r(addr);
 
 	r.Start();
-	getchar();
+	while (true)
+	{
+		cin >> ip;
+		if (ip[0] = 's')
+			break;
+	}
 	r.Stop();
 
 	WSACleanup();

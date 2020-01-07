@@ -201,13 +201,13 @@ void PerfectSend(SOCKET s, CBuffer& buffer)
 	long _sz = htonl(sz);
 	int r = 0;
 	do {
-		auto res = send(s, (char*)&_sz, 4, 0);
+		auto res = send(s, ((char*)&_sz)+r, 4-r, 0);
 		if (res == -1)
 			throw SocketException(SocketException::E::DISCONN);
 		else
 			r += res;
 	} while (r < 4);
-
+	
 	r = 0;
 	do
 	{
@@ -233,7 +233,8 @@ void PerfectRecv(SOCKET s, CBuffer& buffer)
 	} while (t < 4);
 
 	len = ntohl(len);
-	buffer.reserve(len);
+	if (len != buffer.size())
+		buffer.reserve(len);
 	t = 0;
 	do {
 		int t_;
