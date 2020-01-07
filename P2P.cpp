@@ -25,6 +25,7 @@ void NetRouter::Stacking()
 	while (isRunning) {
 		if (++frame == 3) {
 			CalculateOptimalNode();
+			OutputQueue(PacketPair{ parentid, PacketFactory::NetPacketChildCnt(cntChild) });
 			if (parentid == INADDR_NONE)
 				OutputQueue(PacketPair{ parentid, PacketFactory::NetPacketIP(orderer.getValue()) });
 			else
@@ -62,6 +63,7 @@ void NetRouter::Stacking()
 						auto buf = PacketFactory::NetPacketIP(parentid, NetPacketFlag::CONN);
 						PerfectSend(s, buf);
 						AddEvent(s, WSACreateEvent(), addr);
+						++cntChild;
 					}
 					catch (...) {
 						closesocket(s);
@@ -99,6 +101,7 @@ void NetRouter::Stacking()
 				if (rep_addr != INADDR_NONE)
 					async(launch::async, [](NetRouter* r, ULONG addr) { r->ConnectToParent(addr); }, this, rep_addr);
 			}
+				--cntChild;
 			RemoveEvent(idx);
 		}
 	}
@@ -192,7 +195,7 @@ void NetRouter::Tasking()
 void NetRouter::SubTasking()
 {
 	PacketPair pair;
-	while (isRunning) { //√÷¿˚»≠ « ø‰
+	while (isRunning) { //ÏµúÏ†ÅÌôî ÌïÑÏöî
 		{
 			unique_lock<mutex> lk(m_outputLock);
 			if (!m_outputBuffer.empty())
@@ -259,7 +262,7 @@ void NetRouter::BroadCastToNodes(CBuffer& packet, const ULONG& filter)
 			PerfectSend(p.socket, packet);
 		}
 		catch (SocketException e) {
-		} //∑Œ±◊
+		} //Î°úÍ∑∏
 	}
 }
 
@@ -272,7 +275,7 @@ void NetRouter::OutputQueue(PacketPair&& packet)
 	cv.notify_one();
 }
 
-void NetRouter::AddEvent(SOCKET s, WSAEVENT e, ULONG addr) //Stacking∏∏ »£√‚.
+void NetRouter::AddEvent(SOCKET s, WSAEVENT e, ULONG addr) //StackingÎßå Ìò∏Ï∂ú.
 {
 	WSAEventSelect(s, e, FD_READ | FD_CLOSE);
 	auto si = SOCKETIN{ -1,0,s,addr };
@@ -283,7 +286,7 @@ void NetRouter::AddEvent(SOCKET s, WSAEVENT e, ULONG addr) //Stacking∏∏ »£√‚.
 	}
 }
 
-void NetRouter::AddListenEvent(SOCKET s, WSAEVENT e, ULONG addr) //Stacking∏∏ »£√‚.
+void NetRouter::AddListenEvent(SOCKET s, WSAEVENT e, ULONG addr) //StackingÎßå Ìò∏Ï∂ú.
 {
 	WSAEventSelect(s, e, FD_ACCEPT | FD_READ | FD_CLOSE);
 	auto si = SOCKETIN{ -1,0,s,addr };
@@ -294,7 +297,7 @@ void NetRouter::AddListenEvent(SOCKET s, WSAEVENT e, ULONG addr) //Stacking∏∏ »£
 	}
 }
 
-void NetRouter::RemoveEvent(int idx) //Stacking∏∏ »£√‚.
+void NetRouter::RemoveEvent(int idx) //StackingÎßå Ìò∏Ï∂ú.
 {
 	lock_guard<mutex> lk(m_modifyLock);
 	shutdown(m_arrIn.at(idx).socket, SD_BOTH);
